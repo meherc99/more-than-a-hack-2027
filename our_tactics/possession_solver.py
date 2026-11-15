@@ -26,7 +26,8 @@ sys.path.insert(0, ROOT)
 
 from games import GAME, GAMES, DEFAULT_SOURCE, require  # noqa: E402
 
-HOME, AWAY, DEAD = 0, 1, 2
+HOME, AWAY, DEAD, UNKNOWN = 0, 1, 2, 3
+MAX_MISSING_BALL_CARRY_FRAMES = 25
 
 
 def team_of_each_track(meta_path):
@@ -132,9 +133,11 @@ def load_smart_prior(data_dir=None, game=GAME, fps=None):
 
 
 def initial_labels_from_tracking(raw_path, team_of_track, n_frames, pitch, smart_prior=None):
-    """Return H/A/D labels inferred per frame from ball proximity and player availability."""
+    """Return H/A/D/X labels inferred per frame from tracking and available evidence."""
     length, width = pitch
     out = np.full(n_frames, DEAD, dtype=np.int8)
+    missing_ball_run = 0
+    dead_ball_active = False
     if smart_prior is None:
         smart_prior = np.full(n_frames, -1, dtype=np.int8)
 
@@ -157,18 +160,30 @@ def initial_labels_from_tracking(raw_path, team_of_track, n_frames, pitch, smart
             player_groups = parts[1].split(";")
             ball = parse_ball(parts[2])
             if ball is None:
-                if smart_prior[idx] == HOME:
+                missing_ball_run += 1
+                if dead_ball_active:
+                    out[idx] = DEAD
+                elif smart_prior[idx] == HOME:
                     out[idx] = HOME
                 elif smart_prior[idx] == AWAY:
                     out[idx] = AWAY
-                elif idx > 0 and out[idx - 1] != DEAD and idx + 1 < n_frames:
-                    # If the ball disappears briefly inside a live possession, carry the previous
-                    # team label forward rather than creating a false dead-ball split.
-                    out[idx] = out[idx - 1]
+                elif idx > 0 and out[idx - 1] in (HOME, AWAY):
+                    out[idx] = (out[idx - 1]
+                                if missing_ball_run <= MAX_MISSING_BALL_CARRY_FRAMES
+                                else UNKNOWN)
+                elif idx > 0 and out[idx - 1] == UNKNOWN:
+                    out[idx] = UNKNOWN
                 else:
                     out[idx] = DEAD
                 continue
 
+            missing_ball_run = 0
+            if not (0.0 <= ball[0] <= 1.0 and 0.0 <= ball[1] <= 1.0):
+                dead_ball_active = True
+                out[idx] = DEAD
+                continue
+
+            dead_ball_active = False
             ball_x = ball[0] * length
             ball_y = ball[1] * width
             home_best = float("inf")
@@ -221,10 +236,10 @@ def initial_labels_from_tracking(raw_path, team_of_track, n_frames, pitch, smart
 
 
 def code_labels(labels):
-    conversions = {"H": HOME, "A": AWAY, "D": DEAD}
+    conversions = {"H": HOME, "A": AWAY, "D": DEAD, "X": UNKNOWN}
     out = np.empty(len(labels), dtype=np.int8)
     for i, label in enumerate(labels):
-        out[i] = conversions.get(str(label).strip().upper(), DEAD)
+        out[i] = conversions.get(str(label).strip().upper(), UNKNOWN)
     return out
 
 
@@ -244,15 +259,11 @@ def smooth_majority(codes, window):
     away_count = away[high] - away[low]
     dead_count = dead[high] - dead[low]
 
-    out = np.full(n, DEAD, dtype=np.int8)
-    has_players = (home_count + away_count + dead_count) > 0
-    home_wins = home_count >= away_count
-    away_wins = away_count > home_count
-    dead_wins = (home_count == 0) & (away_count == 0)
-
-    out[(has_players) & (home_wins) & (~dead_wins)] = HOME
-    out[(has_players) & (away_wins) & (~dead_wins)] = AWAY
-    out[(has_players) & (dead_wins)] = DEAD
+    out = np.full(n, UNKNOWN, dtype=np.int8)
+    alive_seen = (home_count + away_count) > 0
+    out[alive_seen] = np.where(home_count[alive_seen] >= away_count[alive_seen], HOME, AWAY)
+    dead_only = (~alive_seen) & (dead_count > 0)
+    out[dead_only] = DEAD
     return out
 
 
@@ -265,7 +276,7 @@ def collapse_short_runs(codes, min_run=5):
     out = codes.copy()
     i = 0
     while i < len(out):
-        if out[i] == DEAD:
+        if out[i] not in (HOME, AWAY):
             i += 1
             continue
         start = i
@@ -274,9 +285,9 @@ def collapse_short_runs(codes, min_run=5):
         stop = i + 1
         if stop - start < min_run:
             fill = DEAD
-            if start > 0 and out[start - 1] != DEAD:
+            if start > 0 and out[start - 1] in (HOME, AWAY):
                 fill = out[start - 1]
-            elif stop < len(out) and out[stop] != DEAD:
+            elif stop < len(out) and out[stop] in (HOME, AWAY):
                 fill = out[stop]
             if fill != DEAD:
                 out[start:stop] = fill
@@ -314,7 +325,8 @@ def write_submission(labels, path):
     with open(path, "w") as handle:
         handle.write("frame,label\n")
         for index, code in enumerate(labels):
-            handle.write("{},{}\n".format(index, {HOME: "H", AWAY: "A", DEAD: "D"}[int(code)]))
+            handle.write("{},{}\n".format(
+                index, {HOME: "H", AWAY: "A", DEAD: "D", UNKNOWN: "X"}[int(code)]))
 
 
 def solve(data_dir=None, game=GAME, source=DEFAULT_SOURCE, output=None):

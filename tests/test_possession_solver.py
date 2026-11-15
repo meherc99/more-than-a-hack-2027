@@ -8,7 +8,11 @@ import numpy as np
 from our_tactics.possession_solver import (
     HOME,
     AWAY,
+    DEAD,
+    UNKNOWN,
+    MAX_MISSING_BALL_CARRY_FRAMES,
     collapse_short_runs,
+    initial_labels_from_tracking,
     parse_ball,
     parse_player_group,
     smooth_majority,
@@ -41,6 +45,54 @@ class PossessionSolverTests(unittest.TestCase):
         self.assertTrue(np.array_equal(collapsed[:2], np.array([AWAY, AWAY], dtype=np.int8)))
         self.assertTrue(np.array_equal(collapsed[2:5], np.array([AWAY, AWAY, AWAY], dtype=np.int8)))
         self.assertTrue(np.array_equal(collapsed[5:], np.array([AWAY, AWAY], dtype=np.int8)))
+
+    def test_missing_ball_carry_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "tracking.txt")
+            with open(path, "w") as handle:
+                handle.write("1:0.1,0.5,0;0.9,0.5,0:0.11,0.5,0\n")
+                for frame in range(2, MAX_MISSING_BALL_CARRY_FRAMES + 3):
+                    handle.write("{}:N;N:NaN,NaN,NaN\n".format(frame))
+                handle.write("{}:0.1,0.5,0;0.9,0.5,0:0.89,0.5,0\n".format(
+                    MAX_MISSING_BALL_CARRY_FRAMES + 3))
+
+            labels = initial_labels_from_tracking(
+                path, np.array([HOME, AWAY], dtype=np.int8),
+                MAX_MISSING_BALL_CARRY_FRAMES + 3, (105.3, 68.0))
+
+        self.assertEqual(labels[0], HOME)
+        self.assertTrue(np.all(labels[1:MAX_MISSING_BALL_CARRY_FRAMES + 1] == HOME))
+        self.assertEqual(labels[MAX_MISSING_BALL_CARRY_FRAMES + 1], UNKNOWN)
+        self.assertEqual(labels[MAX_MISSING_BALL_CARRY_FRAMES + 2], AWAY)
+
+    def test_missing_ball_without_previous_possession_remains_dead(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "tracking.txt")
+            with open(path, "w") as handle:
+                handle.write("1:N;N:NaN,NaN,NaN\n")
+
+            labels = initial_labels_from_tracking(
+                path, np.array([HOME, AWAY], dtype=np.int8), 1, (105.3, 68.0))
+
+        self.assertEqual(labels[0], DEAD)
+
+    def test_out_of_bounds_ball_latches_dead_until_it_returns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "tracking.txt")
+            with open(path, "w") as handle:
+                handle.write("1:0.1,0.5,0;0.9,0.5,0:-0.01,0.5,0\n")
+                handle.write("2:N;N:NaN,NaN,NaN\n")
+                handle.write("3:0.1,0.5,0;0.9,0.5,0:0.11,0.5,0\n")
+
+            labels = initial_labels_from_tracking(
+                path, np.array([HOME, AWAY], dtype=np.int8), 3, (105.3, 68.0))
+
+        self.assertTrue(np.array_equal(labels, np.array([DEAD, DEAD, HOME], dtype=np.int8)))
+
+    def test_smoothing_preserves_unobserved_frames_as_unknown(self):
+        codes = np.full(5, UNKNOWN, dtype=np.int8)
+        self.assertTrue(np.array_equal(smooth_majority(codes, 1), codes))
+        self.assertTrue(np.array_equal(collapse_short_runs(codes, min_run=3), codes))
 
     def test_team_of_each_track_from_meta_xml(self):
         with tempfile.TemporaryDirectory() as tmpdir:
