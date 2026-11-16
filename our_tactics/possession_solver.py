@@ -28,6 +28,7 @@ from games import GAME, GAMES, DEFAULT_SOURCE, require  # noqa: E402
 
 HOME, AWAY, DEAD, UNKNOWN = 0, 1, 2, 3
 MAX_MISSING_BALL_CARRY_FRAMES = 25
+STATE_CONFIRMATION_FRAMES = 25
 
 
 def team_of_each_track(meta_path):
@@ -295,26 +296,64 @@ def collapse_short_runs(codes, min_run=5):
     return out
 
 
-def finalise_labels(labels, smart_prior=None):
-    """A gentle cleanup pass before writing CSV."""
-    out = labels.copy()
-    if smart_prior is None:
-        return collapse_short_runs(smooth_majority(out, 20), 5)
+def decode_sustained_states(codes, confirmation_frames=STATE_CONFIRMATION_FRAMES):
+    """Change H/A/D state only after that candidate persists for the confirmation window."""
+    if confirmation_frames < 1:
+        raise ValueError("confirmation_frames must be positive")
 
-    # We only use the smart prior to prevent self-inflicted splits around restarts and dead-ball
-    # stretches. It is intentionally low weight because the tagging is noisy.
-    for index, prior in enumerate(smart_prior):
-        if prior == HOME and out[index] == AWAY:
-            out[index] = HOME
-        elif prior == AWAY and out[index] == HOME:
-            out[index] = AWAY
-        elif prior == HOME and out[index] == DEAD:
-            out[index] = HOME
-        elif prior == AWAY and out[index] == DEAD:
-            out[index] = AWAY
+    out = np.empty_like(codes)
+    current = None
+    pending = None
+    pending_start = 0
+    pending_count = 0
 
-    out = collapse_short_runs(smooth_majority(out, 25), 6)
+    for index, value in enumerate(codes):
+        candidate = int(value)
+        if candidate == UNKNOWN:
+            out[index] = UNKNOWN
+            pending = None
+            pending_count = 0
+            continue
+        if candidate not in (HOME, AWAY, DEAD):
+            raise ValueError("invalid state code: {}".format(candidate))
+        if current is None:
+            current = candidate
+            out[index] = current
+            continue
+        if candidate == current:
+            out[index] = current
+            pending = None
+            pending_count = 0
+            continue
+
+        if candidate == pending:
+            pending_count += 1
+        else:
+            pending = candidate
+            pending_start = index
+            pending_count = 1
+        out[index] = current
+
+        if pending_count >= confirmation_frames:
+            out[pending_start:index + 1] = candidate
+            current = candidate
+            pending = None
+            pending_count = 0
+
     return out
+
+
+def finalise_labels(labels, smart_prior=None):
+    """Apply restart priors, then accept states only after sustained evidence."""
+    out = labels.copy()
+    if smart_prior is not None:
+        for index, prior in enumerate(smart_prior):
+            if prior == HOME and out[index] == AWAY:
+                out[index] = HOME
+            elif prior == AWAY and out[index] == HOME:
+                out[index] = AWAY
+
+    return decode_sustained_states(out)
 
 
 def write_submission(labels, path):

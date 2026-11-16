@@ -11,7 +11,10 @@ from our_tactics.possession_solver import (
     DEAD,
     UNKNOWN,
     MAX_MISSING_BALL_CARRY_FRAMES,
+    STATE_CONFIRMATION_FRAMES,
     collapse_short_runs,
+    decode_sustained_states,
+    finalise_labels,
     initial_labels_from_tracking,
     parse_ball,
     parse_player_group,
@@ -45,6 +48,29 @@ class PossessionSolverTests(unittest.TestCase):
         self.assertTrue(np.array_equal(collapsed[:2], np.array([AWAY, AWAY], dtype=np.int8)))
         self.assertTrue(np.array_equal(collapsed[2:5], np.array([AWAY, AWAY, AWAY], dtype=np.int8)))
         self.assertTrue(np.array_equal(collapsed[5:], np.array([AWAY, AWAY], dtype=np.int8)))
+
+    def test_sustained_decoder_suppresses_brief_switches_and_backdates_confirmed_ones(self):
+        codes = np.array([HOME, HOME, AWAY, AWAY, HOME, AWAY, AWAY, AWAY, AWAY],
+                         dtype=np.int8)
+        decoded = decode_sustained_states(codes, confirmation_frames=3)
+        expected = np.array([HOME, HOME, HOME, HOME, HOME, AWAY, AWAY, AWAY, AWAY],
+                            dtype=np.int8)
+        self.assertTrue(np.array_equal(decoded, expected))
+
+    def test_unknown_resets_pending_switch_evidence(self):
+        codes = np.array([HOME, AWAY, AWAY, UNKNOWN, AWAY, AWAY], dtype=np.int8)
+        decoded = decode_sustained_states(codes, confirmation_frames=3)
+        expected = np.array([HOME, HOME, HOME, UNKNOWN, HOME, HOME], dtype=np.int8)
+        self.assertTrue(np.array_equal(decoded, expected))
+
+    def test_weak_team_prior_does_not_overwrite_confirmed_dead_state(self):
+        codes = np.concatenate((
+            np.full(STATE_CONFIRMATION_FRAMES, DEAD, dtype=np.int8),
+            np.full(STATE_CONFIRMATION_FRAMES, HOME, dtype=np.int8),
+        ))
+        prior = np.full(len(codes), HOME, dtype=np.int8)
+        decoded = finalise_labels(codes, prior)
+        self.assertTrue(np.all(decoded[:STATE_CONFIRMATION_FRAMES] == DEAD))
 
     def test_missing_ball_carry_is_bounded(self):
         with tempfile.TemporaryDirectory() as tmpdir:
