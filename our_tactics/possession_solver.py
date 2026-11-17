@@ -534,7 +534,7 @@ def load_tactical(data_dir, game, source):
     ranges = {}
     for half, v0, v1 in half_video_blocks(game):
         off = frame_offset(game, half)
-        ranges[half] = (v0 + off, v1 + off, off, v0, v1)
+        ranges[half] = (v0, v1, off, v0, v1)
     store = {h: dict(v0=r[3], v1=r[4], ball=np.full((r[4] - r[3] + 1, 2), np.nan),
                      P=None) for h, r in ranges.items()}
     seen_min, seen_max, n_lines, nslots = None, None, 0, None
@@ -561,7 +561,7 @@ def load_tactical(data_dir, game, source):
                     s = store[half]
                     if s["P"] is None:
                         s["P"] = np.full((v1 - v0 + 1, nslots, 2), np.nan)
-                    k = fid - off - v0
+                    k = fid - v0
                     if arr.shape[0] == nslots:
                         s["P"][k] = arr[:, :2] * (pitch[0], pitch[1])
                     bp = parts[2].split(",")
@@ -573,7 +573,7 @@ def load_tactical(data_dir, game, source):
     print("tracking file: %d lines, frame ids %s .. %s, %s slots" % (n_lines, seen_min, seen_max, nslots))
     for half, (i0, i1, off, v0, v1) in ranges.items():
         n_ball = int(np.sum(~np.isnan(store[half]["ball"][:, 0])))
-        print("half %d: expected ids %d..%d (%d frames), ball seen on %.1f%%" %
+        print("half %d: expected video frames %d..%d (%d frames), ball seen on %.1f%%" %
               (half, i0, i1, v1 - v0 + 1, 100.0 * n_ball / (v1 - v0 + 1)))
         if store[half]["P"] is None:
             sys.exit("no tracking rows fall inside half %d's IdFrame range. The file's frame counter does not "
